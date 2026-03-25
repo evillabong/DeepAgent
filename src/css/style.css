@@ -878,13 +878,14 @@ body {
     margin-left: auto;
 }
 
-/* Layout de paneles */
-.main-layout {
+/* Layout de paneles (agent page only — scoped to avoid overriding index.html split/full view toggle) */
+.agent-page .main-layout {
     flex: 1;
     display: flex;
     min-height: 0;
     position: relative;
     background: #fafcff;
+    overflow: hidden;
 }
 
 .panel {
@@ -933,11 +934,14 @@ body {
     color: #c00;
 }
 
+/* Single canonical definition — flex column, fills remaining panel space, clips overflow */
 .panel-content {
     flex: 1;
-    overflow: auto;
-    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
     min-height: 0;
+    padding: 12px;
 }
 
 .panel-resize-handle {
@@ -984,7 +988,8 @@ body {
 .chat-container {
     display: flex;
     flex-direction: column;
-    height: 100%;
+    flex: 1;
+    min-height: 0;
 }
 
 .chat-messages {
@@ -994,6 +999,7 @@ body {
     display: flex;
     flex-direction: column;
     gap: 12px;
+    min-height: 0; /* Allow flex item to shrink below content size for proper scrolling */
 }
 
 .message {
@@ -1187,6 +1193,8 @@ body {
 body.agent-page {
     padding: 0;
     background: white;
+    display: block;
+    overflow: hidden;
 }
 
 /* Responsive para métricas */
@@ -1205,13 +1213,11 @@ body.agent-page {
         gap: 10px;
     }
 }
-/* ===== DIFF EDITOR STYLES ===== */
 .diff-panel .panel-content {
-    display: flex;
-    flex-direction: column;
     padding: 0;
 }
 
+/* ===== DIFF EDITOR STYLES ===== */
 .diff-toolbar {
     padding: 8px 12px;
     background: #f8fbfe;
@@ -1239,16 +1245,6 @@ body.agent-page {
 .monaco-diff-editor .line-delete,
 .monaco-diff-editor .char-delete {
     background: #ffe6e6 !important;
-}
-
-/* Ajustes de altura para los paneles */
-.panel-content {
-    height: 100%;
-    overflow: hidden;
-}
-
-.diff-panel .panel-content {
-    padding: 0;
 }
 
 /* ===== BOTTOM TABS ===== */
@@ -1335,17 +1331,9 @@ body.agent-page {
 /* Scrollable containers */
 .scrollable {
     overflow-y: auto !important;
-    height: 100%;
 }
 
 /* Ajustes de altura para paneles */
-.panel-content {
-    height: 100%;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-}
-
 .tree-container.scrollable {
     flex: 1;
     min-height: 0;
@@ -1365,25 +1353,15 @@ body.agent-page {
 }
 
 /* ===== RESIZE FIXES ===== */
-.main-layout {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    overflow: hidden;
-}
-
 .panel {
     height: 100%;
     overflow: hidden;
 }
 
-.panel-content {
-    height: calc(100% - 45px);
-}
-
-/* Ajuste para el diff editor */
+/* Diff editor: fill remaining space after toolbar */
 .diff-editor-container {
-    height: calc(100% - 40px);
+    flex: 1;
+    min-height: 0;
     width: 100%;
 }
 
