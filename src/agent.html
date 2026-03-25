@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DeepSeek Agent · Análisis de Proyecto</title>
+    
+    <!-- Monaco Editor CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.34.1/min/vs/editor/editor.main.css">
+    
+    <!-- Estilos compartidos -->
+    <link rel="stylesheet" href="css/style.css">
+    
+    <!-- JSZip -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body class="agent-page">
+<div class="agent-container">
+    <!-- Header con información de sesión -->
+    <div class="agent-header">
+        <div class="session-info">
+            <h2>🤖 DeepSeek Agent</h2>
+            <span class="session-badge" id="sessionBadge">Sesión: <span id="sessionId">cargando...</span></span>
+        </div>
+        <div class="header-actions">
+            <button class="btn-primary" id="saveChangesBtn">💾 Guardar cambios</button>
+            <button class="btn-secondary" id="exportSessionBtn">📤 Exportar sesión</button>
+        </div>
+    </div>
+
+    <!-- Controles de visibilidad de paneles -->
+    <div class="visibility-controls">
+        <label class="toggle-label">
+            <input type="checkbox" id="toggleTree" checked> 📁 Árbol
+        </label>
+        <label class="toggle-label">
+            <input type="checkbox" id="toggleDiff" checked> 📊 Diff (Original ↔ Modificado)
+        </label>
+        <label class="toggle-label">
+            <input type="checkbox" id="toggleAgent" checked> 🤖 Agente
+        </label>
+        <div class="reset-controls">
+            <button class="small-btn" id="resetLayout">↺ Resetear layout</button>
+        </div>
+    </div>
+
+    <!-- Layout principal de 3 paneles redimensionables -->
+    <div class="main-layout" id="mainLayout">
+        <!-- Panel 1: Árbol de archivos -->
+        <div class="panel tree-panel" id="treePanel" data-panel="tree">
+            <div class="panel-header">
+                <span>📁 Archivos del proyecto</span>
+                <div class="panel-actions">
+                    <button class="panel-close" data-panel="tree" title="Ocultar panel">✕</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="tree-search">
+                    <input type="text" id="agentTreeSearch" placeholder="Filtrar archivos..." />
+                </div>
+                <div class="tree-container scrollable" id="agentTreeContainer">
+                    <!-- Árbol generado dinámicamente -->
+                    <div class="loading">Cargando árbol...</div>
+                </div>
+            </div>
+            <div class="panel-resize-handle" data-panel="tree"></div>
+        </div>
+
+        <!-- Panel 2: Diff Editor (Original vs Modificado) -->
+        <div class="panel diff-panel" id="diffPanel" data-panel="diff">
+            <div class="panel-header">
+                <span>📊 Comparación: <span id="currentFileName" class="filename">(selecciona un archivo)</span></span>
+                <div class="panel-actions">
+                    <button class="panel-close" data-panel="diff" title="Ocultar panel">✕</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="diff-toolbar">
+                    <button class="small-btn" id="acceptChangesBtn">✅ Aceptar cambios</button>
+                    <button class="small-btn" id="rejectChangesBtn">❌ Rechazar cambios</button>
+                </div>
+                <div id="diffEditorContainer" class="diff-editor-container"></div>
+            </div>
+            <div class="panel-resize-handle" data-panel="diff"></div>
+        </div>
+
+        <!-- Panel 3: Agente / Chat -->
+        <div class="panel agent-panel" id="agentChatPanel" data-panel="agent">
+            <div class="panel-header">
+                <span>🤖 Asistente DeepSeek</span>
+                <div class="panel-actions">
+                    <button class="panel-close" data-panel="agent" title="Ocultar panel">✕</button>
+                </div>
+            </div>
+            <div class="panel-content">
+                <div class="chat-container">
+                    <div class="chat-messages scrollable" id="agentChatMessages">
+                        <div class="message agent">
+                            👋 Hola! Soy tu asistente DeepSeek. ¿En qué puedo ayudarte con este proyecto?
+                        </div>
+                    </div>
+                    <div class="chat-input-area">
+                        <textarea 
+                            id="agentChatInput" 
+                            placeholder="Pregunta sobre el código, pide mejoras, o sugiere cambios..."
+                            rows="3"
+                        ></textarea>
+                        <button class="btn-primary" id="agentSendBtn">Enviar</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tabs inferiores -->
+    <div class="bottom-tabs">
+        <div class="tab-header">
+            <button class="tab-btn active" data-tab="project">📁 Proyecto</button>
+            <button class="tab-btn" data-tab="metrics">📊 Métricas</button>
+        </div>
+        
+        <!-- Tab: Proyecto (vacío por ahora, solo métricas básicas) -->
+        <div class="tab-content active" id="tab-project">
+            <div class="project-summary">
+                <div class="summary-item">
+                    <span class="summary-label">Total archivos:</span>
+                    <span class="summary-value" id="summaryTotalFiles">0</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Archivos modificados:</span>
+                    <span class="summary-value" id="summaryModifiedFiles">0</span>
+                </div>
+                <div class="summary-item">
+                    <span class="summary-label">Líneas totales:</span>
+                    <span class="summary-value" id="summaryTotalLines">0</span>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Tab: Métricas (detalle por archivo) -->
+        <div class="tab-content" id="tab-metrics">
+            <div class="metrics-header">
+                <span>📊 Métricas del proyecto</span>
+                <button class="small-btn" id="refreshMetrics">↻ Actualizar</button>
+            </div>
+            <div class="metrics-grid" id="metricsGrid">
+                <div class="metric-card">
+                    <div class="metric-label">Total archivos</div>
+                    <div class="metric-value" id="metricTotalFiles">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Archivos modificados</div>
+                    <div class="metric-value" id="metricProcessedFiles">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Líneas originales</div>
+                    <div class="metric-value" id="metricOriginalLines">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Líneas modificadas</div>
+                    <div class="metric-value" id="metricModifiedLines">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Cambios</div>
+                    <div class="metric-value" id="metricChanges">0</div>
+                </div>
+                <div class="metric-card">
+                    <div class="metric-label">Tokens estimados</div>
+                    <div class="metric-value" id="metricTokens">0</div>
+                </div>
+            </div>
+            
+            <!-- Métricas por archivo -->
+            <div class="file-metrics">
+                <div class="file-metrics-header">
+                    <span>📋 Detalle por archivo</span>
+                </div>
+                <div class="file-metrics-table scrollable" id="fileMetricsTable">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Archivo</th>
+                                <th>Líneas originales</th>
+                                <th>Líneas modificadas</th>
+                                <th>Cambios</th>
+                                <th>Estado</th>
+                            </tr>
+                        </thead>
+                        <tbody id="fileMetricsBody">
+                            <!-- Se llena dinámicamente -->
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Modal de progreso -->
+<div id="progressIndicator" class="progress-indicator">
+    <div class="progress-content">
+        <div class="progress-spinner"></div>
+        <div class="progress-message" id="progressMessage">Procesando...</div>
+        <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="progressBarFill"></div>
+        </div>
+        <div class="progress-percentage" id="progressPercentage">0%</div>
+    </div>
+</div>
+
+<!-- Monaco Editor loader -->
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.34.1/min/vs/loader.min.js"></script>
+<script src="js/agent.js"></script>
+</body>
+</html>

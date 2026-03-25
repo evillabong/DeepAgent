@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZIP Explorer Pro · Con Monaco Editor</title>
+    
+    <!-- Monaco Editor CSS -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/monaco-editor@0.34.1/min/vs/editor/editor.main.css">
+    
+    <!-- Estilos personalizados -->
+    <link rel="stylesheet" href="css/style.css">
+    
+    <!-- JSZip -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+</head>
+<body>
+<div class="app-container">
+    <div class="app-header">
+        <div class="logo-area">
+            <h2>📦 ZIP Explorer Pro</h2>
+            <span class="badge">con Monaco Editor</span>
+        </div>
+        <div class="upload-section">
+            <div class="file-input-wrap">
+                <input type="file" id="zipFileInput" accept=".zip" />
+                <label for="zipFileInput">📂 Elegir ZIP</label>
+            </div>
+            <button class="btn-primary" id="processZipBtn">⚙️ Procesar</button>
+            <button class="btn-agent" id="agentSessionBtn" disabled>
+                🤖 Iniciar sesión de agente
+            </button>
+        </div>
+    </div>
+
+    <!-- Selector de vista y controles globales -->
+    <div class="view-selector">
+        <div class="view-tabs">
+            <button class="view-tab active" data-view="split">📂 Vista dividida (Monaco)</button>
+            <button class="view-tab" data-view="full">📜 Vista completa (documento)</button>
+        </div>
+        <div class="view-actions">
+            <div class="font-size-control">
+                <label>🔤 Tamaño:</label>
+                <select id="fontSizeSelector">
+                    <option value="small">Pequeño</option>
+                    <option value="normal" selected>Normal</option>
+                    <option value="large">Grande</option>
+                    <option value="xlarge">Extra grande</option>
+                </select>
+            </div>
+            <button class="icon-btn" id="downloadCurrentBtn" title="Descargar vista actual">⬇️ Descargar</button>
+            <button class="icon-btn" id="copyCurrentBtn" title="Copiar al portapapeles">📋 Copiar</button>
+        </div>
+    </div>
+
+    <!-- Vista dividida con Monaco Editor -->
+    <div class="main-layout split-view active" id="splitView">
+        <!-- Panel izquierdo: árbol y búsqueda (redimensionable) -->
+        <div class="tree-panel" id="treePanel">
+            <div class="tree-panel-header">
+                <span>📁 Explorador <span class="exclusion-badge" id="exclusionBadge">0 excluidos</span></span>
+                <div class="resize-handle" id="resizeHandle">⋮</div>
+            </div>
+            
+            <!-- Panel de búsqueda -->
+            <div class="search-box">
+                <label>🔍 BUSCAR EN ARCHIVOS</label>
+                <div class="search-input-group">
+                    <input type="text" id="searchInput" placeholder="texto a buscar..." />
+                    <select id="searchScope">
+                        <option value="all">Todos</option>
+                        <option value="current">Actual</option>
+                    </select>
+                </div>
+                <div class="regex-option">
+                    <label>
+                        <input type="checkbox" id="useRegex"> Regex
+                    </label>
+                    <button class="small-btn" id="searchBtn">Buscar</button>
+                </div>
+                <div id="searchResults" class="search-results">
+                    <!-- Los resultados aparecerán aquí -->
+                </div>
+            </div>
+
+            <!-- Panel de exclusión por extensiones -->
+            <div class="exclusion-panel">
+                <div class="exclusion-header">
+                    <span>🚫 EXCLUIR POR EXTENSIÓN</span>
+                    <button class="small-btn" id="toggleExclusionPanel">▼</button>
+                </div>
+                <div class="exclusion-content" id="exclusionContent">
+                    <div class="extension-list" id="extensionList">
+                        <!-- Las extensiones se cargarán dinámicamente -->
+                    </div>
+                    <div class="exclusion-controls">
+                        <button class="small-btn" id="selectAllExtensions">Seleccionar todo</button>
+                        <button class="small-btn" id="deselectAllExtensions">Deseleccionar todo</button>
+                    </div>
+                    <div class="exclusion-preview">
+                        <label>🔍 Vista previa de exclusión:</label>
+                        <div class="exclusion-stats" id="exclusionStats">
+                            <span id="totalFilesCount">0</span> archivos totales |
+                            <span id="excludedFilesCount">0</span> excluidos |
+                            <span id="visibleFilesCount">0</span> visibles
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="tree-container" id="treeContainer">
+                <div style="padding:20px; color:#798ea0;">Carga un ZIP para ver el árbol</div>
+            </div>
+        </div>
+
+        <!-- Panel central: Monaco Editor -->
+        <div class="code-panel">
+            <div class="panel-header">
+                <h3>📄 <span id="filenameDisplay">[selecciona un archivo]</span></h3>
+                <div class="header-actions">
+                    <select id="languageSelector" class="language-select">
+                        <option value="auto">Auto-detectar</option>
+                        <option value="csharp">C#</option>
+                        <option value="javascript">JavaScript</option>
+                        <option value="typescript">TypeScript</option>
+                        <option value="python">Python</option>
+                        <option value="java">Java</option>
+                        <option value="cpp">C++</option>
+                        <option value="html">HTML</option>
+                        <option value="css">CSS</option>
+                    </select>
+                </div>
+            </div>
+            <div class="code-wrapper" id="monacoContainer"></div>
+        </div>
+    </div>
+
+    <!-- Vista completa (con árbol lateral y contenido sin colapsar) -->
+    <div class="fullview-layout" id="fullView">
+        <div class="fullview-tree-panel">
+            <div class="fullview-tree-header">
+                <h4>📁 Archivos</h4>
+                <div class="fullview-tree-controls">
+                    <button class="small-btn" id="expandAllBtn">📂 Expandir todo</button>
+                    <button class="small-btn" id="collapseAllBtn">📁 Colapsar todo</button>
+                </div>
+                <div class="fullview-tree-search">
+                    <input type="text" id="fullviewTreeSearch" placeholder="Filtrar archivos..." />
+                </div>
+            </div>
+            <div class="fullview-tree-container" id="fullviewTreeContainer">
+                <!-- Árbol de archivos -->
+            </div>
+        </div>
+        <div class="fullview-content-panel">
+            <div class="fullview-content-header">
+                <div class="fullview-controls">
+                    <button class="icon-btn" id="fullviewSearchBtn">🔍 Buscar</button>
+                    <input type="text" id="fullviewSearchInput" placeholder="Término a buscar..." />
+                </div>
+                <div class="fullview-info" id="fullviewInfo">
+                    <span id="visibleFilesCount"></span> archivos
+                </div>
+            </div>
+            <div class="fullview-content" id="fullviewContent">
+                <!-- Contenido completo de todos los archivos -->
+            </div>
+        </div>
+    </div>
+
+    <!-- Barra de estado -->
+    <div class="status-bar" id="statusBar">
+        ⚡ Listo. Carga un archivo ZIP para comenzar.
+    </div>
+</div>
+
+<!-- Modal de progreso -->
+<div id="progressIndicator" class="progress-indicator">
+    <div class="progress-content">
+        <div class="progress-spinner"></div>
+        <div class="progress-message" id="progressMessage">Procesando...</div>
+        <div class="progress-bar-container">
+            <div class="progress-bar-fill" id="progressBarFill"></div>
+        </div>
+        <div class="progress-percentage" id="progressPercentage">0%</div>
+    </div>
+</div>
+
+<!-- Monaco Editor loader -->
+<script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.34.1/min/vs/loader.min.js"></script>
+<script src="js/script.js"></script>
+</body>
+</html>
