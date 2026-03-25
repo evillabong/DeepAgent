@@ -10,8 +10,14 @@
     let fileMap = new Map(); // filename -> { original, modified, lineCount, language }
     let modifiedFiles = new Map(); // filename -> modifiedContent
     let fullProjectText = ''; // Texto completo del proyecto para contexto
-    let conversationHistory = []; // Historial de la conversación con DeepSeek
+    let conversationHistory = []; // Historial Q&A con DeepSeek
+    let projectContextMessages = []; // Mensajes del proyecto en partes Base64
     let isProcessing = false;
+    let projectContextLoaded = false; // Si el proyecto ya fue enviado a DeepSeek
+    let isLoadingContext = false; // Si actualmente se está cargando el contexto
+    // ===== CONFIGURACIÓN DE CONTEXTO =====
+    const CHUNK_SIZE = 50000; // Caracteres Base64 por fragmento
+    const MAX_CONVERSATION_HISTORY = 20; // Máximo de mensajes Q&A a incluir por llamada
     // Nuevas variables para exclusión
     let excludedExtensions = new Set();
     let availableExtensions = new Set();
@@ -39,6 +45,7 @@
         sendBtn: document.getElementById('agentSendBtn'),
         saveChangesBtn: document.getElementById('saveChangesBtn'),
         exportSessionBtn: document.getElementById('exportSessionBtn'),
+        reloadContextBtn: document.getElementById('reloadContextBtn'),
         refreshMetrics: document.getElementById('refreshMetrics'),
         resetLayout: document.getElementById('resetLayout'),
         acceptChangesBtn: document.getElementById('acceptChangesBtn'),
@@ -167,7 +174,49 @@ ${content}
 [file content end]`;
     }
 
-    // ===== OBTENER SESSION ID DE LA URL =====
+    // ===== BASE64 ENCODE/DECODE (Unicode-safe) =====
+    function toBase64(str) {
+        return btoa(unescape(encodeURIComponent(str)));
+    }
+
+    function fromBase64(b64) {
+        try {
+            return decodeURIComponent(escape(atob(b64)));
+        } catch (e) {
+            console.warn('Base64 decode fallback (non-Unicode content):', e);
+            return atob(b64); // fallback para contenido no-Unicode
+        }
+    }
+
+    // ===== SYSTEM PROMPT CON FORMATO XML ESTANDARIZADO =====
+    const RESPONSE_SYSTEM_PROMPT = `Eres un asistente experto en análisis y edición de código. El proyecto completo fue cargado en esta conversación en partes Base64 (UTF-8).
+
+SIEMPRE responde usando el siguiente formato XML estándar:
+
+<respuesta>
+  <analisis>Tu análisis o respuesta al usuario</analisis>
+  <cambios>
+    <!-- Incluir SOLO si hay archivos a modificar, crear o eliminar -->
+    <archivo nombre="ruta/del/archivo.ext" accion="modificar">
+      <contenido_base64>BASE64_DEL_NUEVO_CONTENIDO_EN_UTF8</contenido_base64>
+    </archivo>
+    <archivo nombre="ruta/archivo_nuevo.ext" accion="crear">
+      <contenido_base64>BASE64_DEL_CONTENIDO</contenido_base64>
+    </archivo>
+    <archivo nombre="ruta/a_eliminar.ext" accion="eliminar"/>
+  </cambios>
+  <instrucciones>Instrucciones adicionales para el usuario (opcional)</instrucciones>
+</respuesta>
+
+Reglas estrictas:
+- SIEMPRE usa esta estructura XML, nunca respondas fuera de ella.
+- Si no hay cambios de código, omite el bloque <cambios> completo.
+- El contenido de archivos SIEMPRE en Base64 codificado en UTF-8.
+- Sé técnico y preciso en <analisis>.
+- Puedes referirte a archivos específicos por su nombre del proyecto.
+- Nunca respondas fuera del bloque <respuesta>.`;
+
+
     function getSessionIdFromUrl() {
         const urlParams = new URLSearchParams(window.location.search);
         return urlParams.get('session');
@@ -188,11 +237,11 @@ ${content}
     }
 
     // ===== CARGAR DATOS DE LA SESIÓN =====
-    function loadSessionData() {
+    async function loadSessionData() {
         sessionId = getSessionIdFromUrl();
 
         if (!sessionId) {
-            sessionId = localStorage.getItem('currentSession');
+            sessionId = await DeepAgentDB.getMeta('currentSession');
         }
 
         if (!sessionId) {
@@ -203,27 +252,24 @@ ${content}
 
         elements.sessionId.textContent = sessionId;
 
-        // Cargar datos de la sesión
-        const sessionData = localStorage.getItem(`session_${sessionId}`);
-        if (!sessionData) {
+        // Cargar datos de la sesión desde IndexedDB
+        const sessionRecord = await DeepAgentDB.loadSession(sessionId);
+        if (!sessionRecord) {
             addChatMessage('system', '❌ No se encontraron datos para esta sesión');
             return false;
         }
 
         try {
-            const parsed = JSON.parse(sessionData);
-
             // Guardar el texto completo del proyecto
-            fullProjectText = parsed.content;
+            fullProjectText = sessionRecord.content;
 
             // Parsear los archivos individuales
-            parseProjectFiles(parsed.content);
+            parseProjectFiles(sessionRecord.content);
 
             // Cargar cambios guardados previamente si existen
-            const savedChanges = localStorage.getItem(`changes_${sessionId}`);
+            const savedChanges = await DeepAgentDB.loadChanges(sessionId);
             if (savedChanges) {
-                const changes = JSON.parse(savedChanges);
-                changes.forEach(change => {
+                savedChanges.forEach(change => {
                     if (fileMap.has(change.filename)) {
                         fileMap.get(change.filename).modified = change.content;
                         modifiedFiles.set(change.filename, change.content);
@@ -231,7 +277,9 @@ ${content}
                 });
             }
 
-            addChatMessage('agent', `✅ Sesión cargada: ${fileMap.size} archivos encontrados (${formatBytes(fullProjectText.length)})`);
+            const sizeInfo = formatBytes(fullProjectText.length);
+            addChatMessage('agent', `✅ Sesión cargada: ${fileMap.size} archivos encontrados (${sizeInfo}). Iniciando carga de contexto...`);
+
             return true;
 
         } catch (error) {
@@ -640,102 +688,276 @@ Esta versión incluye:
         return "Entiendo tu pregunta. Basado en el código que veo, puedo sugerir algunas optimizaciones. ¿Hay algún archivo específico en el que quieras que me enfoque?";
     }
 
-    // ===== ENVIAR MENSAJE AL AGENTE CON PROYECTO COMPLETO =====
+    // ===== INICIALIZAR CONTEXTO DEL PROYECTO EN PARTES BASE64 =====
+    async function initProjectContext() {
+        if (isLoadingContext || fileMap.size === 0) {
+            if (fileMap.size === 0) {
+                addChatMessage('system', '⚠️ No hay archivos en el proyecto para cargar en el contexto.');
+            }
+            return;
+        }
+        isLoadingContext = true;
+        projectContextLoaded = false;
+        projectContextMessages = [];
+
+        // Deshabilitar el chat durante la carga
+        elements.chatInput.disabled = true;
+        elements.sendBtn.disabled = true;
+        if (elements.reloadContextBtn) elements.reloadContextBtn.disabled = true;
+
+        try {
+            // Construir texto completo del proyecto usando el formato DeepSeek
+            const allFilesText = Array.from(fileMap.entries())
+                .map(([filename, data]) => formatFileForDeepSeek(filename, data.original))
+                .join('\n\n');
+
+            // Codificar en Base64 (Unicode-safe)
+            const b64Content = toBase64(allFilesText);
+            const totalParts = Math.ceil(b64Content.length / CHUNK_SIZE);
+
+            addChatMessage('system', `📤 Enviando proyecto a DeepSeek en ${totalParts} parte(s) Base64 (${formatBytes(b64Content.length)} codificados)...`);
+            showProgress(`Inicializando contexto (0/${totalParts})...`);
+
+            // --- Mensaje INIT: establecer el protocolo ---
+            const initMessage = `PROYECTO_INIT
+session_id: ${sessionId}
+total_parts: ${totalParts}
+encoding: base64
+Vas a recibir el código fuente completo de un proyecto de software en ${totalParts} parte(s) codificadas en Base64 (UTF-8).
+Espera a recibir TODAS las partes antes de procesarlas (PROYECTO_PART_1 hasta PROYECTO_PART_${totalParts}).
+
+Protocolo de respuesta durante la carga:
+- Cuando recibas cada parte intermedia responde ÚNICAMENTE con:
+  <respuesta><estado>PARTE_RECIBIDA</estado><partes_recibidas>N</partes_recibidas><partes_totales>${totalParts}</partes_totales></respuesta>
+- Cuando recibas la ÚLTIMA parte (${totalParts}/${totalParts}), decodifica el Base64, analiza el proyecto y responde con:
+  <respuesta><estado>PROYECTO_LISTO</estado><archivos_cargados>N</archivos_cargados><resumen>Breve descripción del proyecto</resumen></respuesta>
+
+A partir de ese momento, en TODAS tus respuestas usa el formato XML estándar indicado en el system prompt.`;
+
+            projectContextMessages.push({ role: 'user', content: initMessage });
+            const initReply = await callDeepSeekAPI(projectContextMessages);
+            projectContextMessages.push({ role: 'assistant', content: initReply });
+
+            updateProgress(Math.round(1 / (totalParts + 1) * 100), `Protocolo aceptado, enviando partes...`);
+
+            // --- Enviar cada fragmento Base64 ---
+            for (let i = 0; i < totalParts; i++) {
+                const partNum = i + 1;
+                const chunk = b64Content.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+
+                updateProgress(
+                    Math.round((partNum / totalParts) * 100),
+                    `Enviando parte ${partNum}/${totalParts}...`
+                );
+
+                const partMessage = `PROYECTO_PART_${partNum}_DE_${totalParts}\n${chunk}`;
+                projectContextMessages.push({ role: 'user', content: partMessage });
+                const partReply = await callDeepSeekAPI(projectContextMessages);
+                projectContextMessages.push({ role: 'assistant', content: partReply });
+
+                addChatMessage('system', `📦 Parte ${partNum}/${totalParts} confirmada por DeepSeek`);
+            }
+
+            hideProgress();
+            projectContextLoaded = true;
+
+            // Interpretar la respuesta final (PROYECTO_LISTO)
+            const finalReply = projectContextMessages[projectContextMessages.length - 1].content;
+            const parsedInit = parseStandardResponse(finalReply, true);
+            if (parsedInit && parsedInit.estado === 'PROYECTO_LISTO') {
+                const resumen = parsedInit.resumen || `${fileMap.size} archivos cargados`;
+                addChatMessage('agent', `✅ Proyecto cargado en DeepSeek: ${resumen}`);
+            } else {
+                addChatMessage('agent', `✅ Proyecto enviado en ${totalParts} parte(s). ¡Puedes empezar a consultar!`);
+            }
+
+        } catch (error) {
+            hideProgress();
+            projectContextLoaded = false;
+            addChatMessage('system', `❌ Error al cargar el contexto: ${error.message}. Usa el botón "Recargar contexto" para reintentar.`);
+            console.error('Error in initProjectContext:', error);
+        } finally {
+            isLoadingContext = false;
+            elements.chatInput.disabled = false;
+            elements.sendBtn.disabled = false;
+            if (elements.reloadContextBtn) elements.reloadContextBtn.disabled = false;
+        }
+    }
+
+    // ===== PARSEAR RESPUESTA XML ESTANDARIZADA =====
+    function parseStandardResponse(responseText, isInitPhase = false) {
+        try {
+            const xmlMatch = responseText.match(/<respuesta>([\s\S]*?)<\/respuesta>/);
+            if (!xmlMatch) return null;
+
+            const xmlContent = xmlMatch[1];
+
+            const getTag = (tag) => {
+                const m = xmlContent.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`));
+                return m ? m[1].trim() : null;
+            };
+
+            const result = {
+                estado: getTag('estado'),
+                analisis: getTag('analisis'),
+                instrucciones: getTag('instrucciones'),
+                resumen: getTag('resumen'),
+                archivosCargados: getTag('archivos_cargados'),
+                cambios: []
+            };
+
+            if (isInitPhase) return result;
+
+            // Parsear archivos a modificar/crear/eliminar
+            // Matches self-closing (<archivo nombre="x" accion="y"/>) or
+            // content-bearing (<archivo nombre="x" accion="y">...</archivo>) tags.
+            const archivoRegex = /<archivo\s+nombre="([^"]+)"\s+accion="([^"]+)"(?:\s*\/>|>([\s\S]*?)<\/archivo>)/g;
+            let match;
+            while ((match = archivoRegex.exec(xmlContent)) !== null) {
+                const nombre = match[1];
+                const accion = match[2];
+                const innerContent = match[3] || '';
+                const b64Match = innerContent.match(/<contenido_base64>([\s\S]*?)<\/contenido_base64>/);
+                const contenidoB64 = b64Match ? b64Match[1].trim() : null;
+                result.cambios.push({
+                    nombre,
+                    accion,
+                    contenido: contenidoB64 ? fromBase64(contenidoB64) : null
+                });
+            }
+
+            return result;
+        } catch (error) {
+            console.error('Error parsing standard response:', error);
+            return null;
+        }
+    }
+
+    // ===== APLICAR CAMBIOS DE ARCHIVOS DESDE RESPUESTA XML =====
+    function applyParsedChanges(cambios) {
+        if (!cambios || cambios.length === 0) return 0;
+        let applied = 0;
+        for (const cambio of cambios) {
+            const { nombre, accion, contenido } = cambio;
+            if (accion === 'eliminar') {
+                fileMap.delete(nombre);
+                modifiedFiles.delete(nombre);
+                applied++;
+                addChatMessage('system', `🗑️ Archivo eliminado: ${nombre}`);
+                buildTree(Array.from(fileMap.keys()));
+                continue;
+            }
+            if ((accion === 'modificar' || accion === 'crear') && contenido !== null) {
+                if (accion === 'crear' && !fileMap.has(nombre)) {
+                    fileMap.set(nombre, {
+                        original: contenido,
+                        modified: contenido,
+                        lineCount: contenido.split('\n').length,
+                        language: getLanguageFromFilename(nombre)
+                    });
+                    buildTree(Array.from(fileMap.keys()));
+                }
+                const fileData = fileMap.get(nombre);
+                if (fileData) {
+                    fileData.modified = contenido;
+                    modifiedFiles.set(nombre, contenido);
+                    if (currentFile === nombre && diffEditor) {
+                        const modifiedModel = monaco.editor.createModel(contenido, fileData.language);
+                        diffEditor.getModifiedEditor().setModel(modifiedModel);
+                    }
+                    applied++;
+                    addChatMessage('system', `✏️ ${accion === 'crear' ? 'Creado' : 'Modificado'}: ${nombre}`);
+                }
+            }
+        }
+        if (applied > 0) updateMetrics();
+        return applied;
+    }
+
+    // ===== ENVIAR MENSAJE AL AGENTE =====
     async function sendMessage() {
-        if (isProcessing) return;
+        // isLoadingContext: context is currently being loaded (sequential chunk API calls in progress)
+        // !projectContextLoaded: context load failed or hasn't started yet
+        // Both block sending since the project context is not available.
+        if (isProcessing || isLoadingContext) return;
+
+        if (!projectContextLoaded) {
+            addChatMessage('system', '⏳ El contexto del proyecto aún se está cargando. Por favor espera...');
+            return;
+        }
 
         const message = elements.chatInput.value.trim();
         if (!message) return;
 
-        // Agregar mensaje del usuario
         addChatMessage('user', message);
         elements.chatInput.value = '';
-
-        // Mostrar indicador de pensamiento
         addChatMessage('agent', '⏳ Pensando...');
-
         isProcessing = true;
 
         try {
-            // CONSTRUIR CONTEXTO CON EL PROYECTO COMPLETO (SIN LIMITAR)
-            // Usando el formato oficial de DeepSeek para archivos [citation:10]
-            let fileContexts = Array.from(fileMap.entries())
-                .map(([filename, data]) => formatFileForDeepSeek(filename, data.original))
-                .join('\n\n');
-            const systemPrompt = `Eres un asistente experto en análisis de código especializado en revisar proyectos completos.
-
-A continuación tienes el proyecto completo con todos sus archivos codificado con Base64:
-
-${toBase64(fileContexts)}
-
-El usuario puede preguntar sobre cualquier aspecto del proyecto, sugerir mejoras, o pedir modificaciones.
-Cuando sugieras cambios en el código, preséntalos en bloques de código con el lenguaje apropiado usando el formato \`\`\`lenguaje\ncódigo\n\`\`\`.
-Sé específico y profesional en tus respuestas. Puedes referirte a archivos específicos por su nombre.`;
-
-            // Preparar mensajes para DeepSeek
+            // El proyecto ya está en projectContextMessages; solo añadir Q&A reciente
             const messages = [
-                { role: 'system', content: escapeObjectForJSON(systemPrompt) },
-                ...conversationHistory.slice(-10), // Últimos 10 mensajes para contexto
+                { role: 'system', content: RESPONSE_SYSTEM_PROMPT },
+                ...projectContextMessages,
+                ...conversationHistory.slice(-MAX_CONVERSATION_HISTORY),
                 { role: 'user', content: message }
             ];
 
-            // Llamar a DeepSeek
             const response = await callDeepSeekAPI(messages);
 
-            // Actualizar historial
             conversationHistory.push(
                 { role: 'user', content: message },
                 { role: 'assistant', content: response }
             );
 
-            // Eliminar mensaje de "pensando"
+            // Eliminar el mensaje "Pensando..."
             if (elements.chatMessages.lastChild) {
                 elements.chatMessages.removeChild(elements.chatMessages.lastChild);
             }
 
-            // Procesar respuesta (detectar bloques de código)
-            const parts = response.split('```');
-            for (let i = 0; i < parts.length; i++) {
-                if (i % 2 === 0) {
-                    // Texto normal
-                    if (parts[i].trim()) {
-                        addChatMessage('agent', parts[i].trim());
+            // Intentar parsear como XML estandarizado
+            const parsed = parseStandardResponse(response);
+            if (parsed) {
+                if (parsed.analisis) {
+                    addChatMessage('agent', parsed.analisis);
+                }
+                if (parsed.cambios && parsed.cambios.length > 0) {
+                    const applied = applyParsedChanges(parsed.cambios);
+                    if (applied > 0) {
+                        addChatMessage('system', `✅ ${applied} archivo(s) actualizado(s) en el editor`);
                     }
-                } else {
-                    // Código
-                    const codeLines = parts[i].split('\n');
-                    const language = codeLines[0].trim();
-                    const code = codeLines.slice(1).join('\n').trim();
-
-                    if (code) {
-                        addChatMessage('agent', `\`\`\`${language}\n${code}\n\`\`\``, true);
-
-                        // Si el código parece ser para el archivo actual, preguntar si quiere aplicarlo
-                        if (currentFile && code.includes('function')) {
-                            setTimeout(() => {
-                                addChatMessage('system', '💡 ¿Quieres aplicar estos cambios al archivo actual? Usa los botones "Aceptar" o "Rechazar" abajo.');
-                            }, 500);
-                        }
+                }
+                if (parsed.instrucciones) {
+                    addChatMessage('system', `💡 ${parsed.instrucciones}`);
+                }
+                // Si no se extrajo nada útil, mostrar la respuesta raw como fallback
+                if (!parsed.analisis && !parsed.cambios?.length && !parsed.instrucciones) {
+                    addChatMessage('agent', response);
+                }
+            } else {
+                // Fallback: parsear bloques de código markdown
+                const parts = response.split('```');
+                for (let i = 0; i < parts.length; i++) {
+                    if (i % 2 === 0) {
+                        if (parts[i].trim()) addChatMessage('agent', parts[i].trim());
+                    } else {
+                        const codeLines = parts[i].split('\n');
+                        const language = codeLines[0].trim();
+                        const code = codeLines.slice(1).join('\n').trim();
+                        if (code) addChatMessage('agent', `\`\`\`${language}\n${code}\n\`\`\``, true);
                     }
                 }
             }
 
         } catch (error) {
             console.error('Error:', error);
-
-            // Eliminar mensaje de "pensando"
             if (elements.chatMessages.lastChild) {
                 elements.chatMessages.removeChild(elements.chatMessages.lastChild);
             }
-
-            // Mensaje de error más descriptivo
             addChatMessage('system', `❌ Error: ${error.message}`);
-
-            // Sugerir solución
             if (error.message.includes('API Error: 400')) {
-                addChatMessage('system', '💡 El proyecto puede ser demasiado grande. DeepSeek soporta hasta ~500k caracteres (128k tokens). Tu proyecto tiene aproximadamente ' + formatBytes(fullProjectText.length));
+                addChatMessage('system', `💡 El proyecto puede ser demasiado grande para el contexto de DeepSeek (~128k tokens). Considera excluir archivos binarios o generados en el explorador ZIP.`);
             }
-
         } finally {
             isProcessing = false;
         }
@@ -798,13 +1020,13 @@ Sé específico y profesional en tus respuestas. Puedes referirte a archivos esp
     }
 
     // ===== GUARDAR CAMBIOS =====
-    function saveChanges() {
+    async function saveChanges() {
         const changes = [];
         for (const [filename, content] of modifiedFiles) {
             changes.push({ filename, content });
         }
 
-        localStorage.setItem(`changes_${sessionId}`, JSON.stringify(changes));
+        await DeepAgentDB.saveChanges(sessionId, changes);
         addChatMessage('system', `✅ Cambios guardados (${changes.length} archivos modificados)`);
     }
 
@@ -928,6 +1150,12 @@ Sé específico y profesional en tus respuestas. Puedes referirte a archivos esp
 
         elements.saveChangesBtn.addEventListener('click', saveChanges);
         elements.exportSessionBtn.addEventListener('click', exportSession);
+        if (elements.reloadContextBtn) {
+            elements.reloadContextBtn.addEventListener('click', () => {
+                conversationHistory = [];
+                initProjectContext();
+            });
+        }
         elements.refreshMetrics.addEventListener('click', updateMetrics);
         elements.resetLayout.addEventListener('click', resetLayout);
         elements.acceptChangesBtn.addEventListener('click', acceptChanges);
@@ -937,30 +1165,21 @@ Sé específico y profesional en tus respuestas. Puedes referirte a archivos esp
     }
 
     // ===== INICIALIZACIÓN =====
-    window.addEventListener('load', () => {
+    window.addEventListener('load', async () => {
         initTabs();
         initDiffEditor();
         initResize();
         initPanelCloses();
         initEventListeners();
 
-        if (loadSessionData()) {
+        if (await loadSessionData()) {
             // Seleccionar primer archivo automáticamente
             const firstFile = Array.from(fileMap.keys())[0];
             if (firstFile) {
                 setTimeout(() => selectFile(firstFile), 500);
             }
+            // Iniciar carga del contexto en partes Base64
+            await initProjectContext();
         }
     });
-    function toBase64(str) {
-    const bytes = new TextEncoder().encode(str);
-    let binary = "";
-    bytes.forEach(b => binary += String.fromCharCode(b));
-    return btoa(binary);
-    function fromBase64(base64) {
-    const binary = atob(base64);
-    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-}
-}
 })();
