@@ -188,11 +188,11 @@ ${content}
     }
 
     // ===== CARGAR DATOS DE LA SESIÓN =====
-    function loadSessionData() {
+    async function loadSessionData() {
         sessionId = getSessionIdFromUrl();
 
         if (!sessionId) {
-            sessionId = localStorage.getItem('currentSession');
+            sessionId = await DeepAgentDB.getMeta('currentSession');
         }
 
         if (!sessionId) {
@@ -203,27 +203,24 @@ ${content}
 
         elements.sessionId.textContent = sessionId;
 
-        // Cargar datos de la sesión
-        const sessionData = localStorage.getItem(`session_${sessionId}`);
-        if (!sessionData) {
+        // Cargar datos de la sesión desde IndexedDB
+        const sessionRecord = await DeepAgentDB.loadSession(sessionId);
+        if (!sessionRecord) {
             addChatMessage('system', '❌ No se encontraron datos para esta sesión');
             return false;
         }
 
         try {
-            const parsed = JSON.parse(sessionData);
-
             // Guardar el texto completo del proyecto
-            fullProjectText = parsed.content;
+            fullProjectText = sessionRecord.content;
 
             // Parsear los archivos individuales
-            parseProjectFiles(parsed.content);
+            parseProjectFiles(sessionRecord.content);
 
             // Cargar cambios guardados previamente si existen
-            const savedChanges = localStorage.getItem(`changes_${sessionId}`);
+            const savedChanges = await DeepAgentDB.loadChanges(sessionId);
             if (savedChanges) {
-                const changes = JSON.parse(savedChanges);
-                changes.forEach(change => {
+                savedChanges.forEach(change => {
                     if (fileMap.has(change.filename)) {
                         fileMap.get(change.filename).modified = change.content;
                         modifiedFiles.set(change.filename, change.content);
@@ -231,7 +228,15 @@ ${content}
                 });
             }
 
-            addChatMessage('agent', `✅ Sesión cargada: ${fileMap.size} archivos encontrados (${formatBytes(fullProjectText.length)})`);
+            const sizeInfo = formatBytes(fullProjectText.length);
+            addChatMessage('agent', `✅ Sesión cargada: ${fileMap.size} archivos encontrados (${sizeInfo})`);
+
+            // Advertir al usuario si el proyecto supera el límite de contexto de DeepSeek
+            const DEEPSEEK_CONTEXT_LIMIT = 400000; // ~100k tokens (safe margin)
+            if (fullProjectText.length > DEEPSEEK_CONTEXT_LIMIT) {
+                addChatMessage('system', `⚠️ El proyecto es grande (${sizeInfo}). DeepSeek soporta ~128k tokens. Usa el panel de exclusiones en el explorador ZIP para excluir archivos irrelevantes (e.g. archivos generados, dependencias) y reinicia la sesión si el agente devuelve errores de contexto.`);
+            }
+
             return true;
 
         } catch (error) {
@@ -657,16 +662,35 @@ Esta versión incluye:
         isProcessing = true;
 
         try {
-            // CONSTRUIR CONTEXTO CON EL PROYECTO COMPLETO (SIN LIMITAR)
+            // CONSTRUIR CONTEXTO CON EL PROYECTO COMPLETO
             // Usando el formato oficial de DeepSeek para archivos [citation:10]
-            let fileContexts = Array.from(fileMap.entries())
-                .map(([filename, data]) => formatFileForDeepSeek(filename, data.original))
-                .join('\n\n');
+            const DEEPSEEK_CONTEXT_LIMIT = 400000; // ~100k tokens (safe margin)
+            const fileEntries = Array.from(fileMap.entries());
+            const includedFiles = [];
+            let totalLength = 0;
+            let truncated = false;
+
+            for (const [filename, data] of fileEntries) {
+                const formatted = formatFileForDeepSeek(filename, data.original);
+                if (totalLength + formatted.length > DEEPSEEK_CONTEXT_LIMIT) {
+                    truncated = true;
+                    break;
+                }
+                includedFiles.push(formatted);
+                totalLength += formatted.length + 2; // +2 for the '\n\n' separator
+            }
+
+            const fileContexts = includedFiles.join('\n\n');
+
+            if (truncated) {
+                addChatMessage('system', `⚠️ El proyecto excede el límite de contexto (~400k caracteres). Solo se incluirán ${includedFiles.length} de ${fileEntries.length} archivos. Excluye archivos no relevantes en el explorador ZIP y reinicia la sesión para mejorar la cobertura.`);
+            }
+
             const systemPrompt = `Eres un asistente experto en análisis de código especializado en revisar proyectos completos.
 
-A continuación tienes el proyecto completo con todos sus archivos codificado con Base64:
+A continuación tienes el proyecto completo con todos sus archivos:
 
-${toBase64(fileContexts)}
+${fileContexts}
 
 El usuario puede preguntar sobre cualquier aspecto del proyecto, sugerir mejoras, o pedir modificaciones.
 Cuando sugieras cambios en el código, preséntalos en bloques de código con el lenguaje apropiado usando el formato \`\`\`lenguaje\ncódigo\n\`\`\`.
@@ -798,13 +822,13 @@ Sé específico y profesional en tus respuestas. Puedes referirte a archivos esp
     }
 
     // ===== GUARDAR CAMBIOS =====
-    function saveChanges() {
+    async function saveChanges() {
         const changes = [];
         for (const [filename, content] of modifiedFiles) {
             changes.push({ filename, content });
         }
 
-        localStorage.setItem(`changes_${sessionId}`, JSON.stringify(changes));
+        await DeepAgentDB.saveChanges(sessionId, changes);
         addChatMessage('system', `✅ Cambios guardados (${changes.length} archivos modificados)`);
     }
 
@@ -937,14 +961,14 @@ Sé específico y profesional en tus respuestas. Puedes referirte a archivos esp
     }
 
     // ===== INICIALIZACIÓN =====
-    window.addEventListener('load', () => {
+    window.addEventListener('load', async () => {
         initTabs();
         initDiffEditor();
         initResize();
         initPanelCloses();
         initEventListeners();
 
-        if (loadSessionData()) {
+        if (await loadSessionData()) {
             // Seleccionar primer archivo automáticamente
             const firstFile = Array.from(fileMap.keys())[0];
             if (firstFile) {
@@ -952,15 +976,4 @@ Sé específico y profesional en tus respuestas. Puedes referirte a archivos esp
             }
         }
     });
-    function toBase64(str) {
-    const bytes = new TextEncoder().encode(str);
-    let binary = "";
-    bytes.forEach(b => binary += String.fromCharCode(b));
-    return btoa(binary);
-    function fromBase64(base64) {
-    const binary = atob(base64);
-    const bytes = Uint8Array.from(binary, c => c.charCodeAt(0));
-    return new TextDecoder().decode(bytes);
-}
-}
 })();

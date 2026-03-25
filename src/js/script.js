@@ -348,7 +348,7 @@
         });
     }
 
-    // Guardar proyecto en Blob Storage (simulado con localStorage)
+    // Guardar proyecto en IndexedDB (soporta proyectos de cualquier tamaño)
     async function saveProjectToBlob(sessionId, projectData) {
         try {
             // Crear el contenido del archivo de texto completo (respetando exclusiones)
@@ -379,14 +379,11 @@
                 }))
             };
             
-            // Guardar en localStorage (simulación de blob storage)
-            localStorage.setItem(`session_${sessionId}`, JSON.stringify({
-                content: fullText,
-                metadata: projectMetadata
-            }));
+            // Guardar en IndexedDB (sin límite práctico de tamaño)
+            await DeepAgentDB.saveSession(sessionId, fullText, projectMetadata);
             
             // También guardar una referencia a la sesión actual
-            localStorage.setItem('currentSession', sessionId);
+            await DeepAgentDB.setMeta('currentSession', sessionId);
             
             return {
                 sessionId,
@@ -471,7 +468,7 @@
     }
 
     // Redirigir a la página del agente
-    function redirectToAgent() {
+    async function redirectToAgent() {
         if (!currentSessionId) {
             alert('Primero inicia una sesión de agente');
             return;
@@ -486,7 +483,7 @@
             timestamp: new Date().toISOString()
         };
         
-        localStorage.setItem(`session_state_${currentSessionId}`, JSON.stringify(sessionState));
+        await DeepAgentDB.setMeta(`session_state_${currentSessionId}`, sessionState);
         
         // Construir URL del agente (para desarrollo)
         const agentUrl = `/agent/${currentSessionId}`;
